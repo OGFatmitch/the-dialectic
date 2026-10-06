@@ -56,6 +56,9 @@ class ResearchPlan(BaseModel):
 
 class SearchRequest(BaseModel):
     provider: str = "openai"
+    mode: str = Field(default="standard", pattern="^(quick|standard|deep)$")
+    force: bool = False
+    approved_warning: bool = False
 
 
 class SearchResult(BaseModel):
@@ -63,6 +66,33 @@ class SearchResult(BaseModel):
     query_count: int
     sources_added: int
     sources_verified: int = 0
+    queries_skipped: int = 0
+    estimated_cost_usd: float = 0
+
+
+class BudgetSettings(BaseModel):
+    project_limit_usd: float = Field(default=100, gt=0)
+    research_limit_usd: float = Field(default=15, gt=0)
+    single_run_warning_usd: float = Field(default=1, gt=0)
+    hard_cap_enabled: bool = True
+
+
+class BudgetSummary(BudgetSettings):
+    project_spend_usd: float
+    research_spend_usd: float
+    remaining_project_usd: float
+    remaining_research_usd: float
+
+
+class SearchPreflight(BaseModel):
+    mode: str
+    query_count: int
+    new_query_count: int
+    duplicate_query_count: int
+    estimated_cost_usd: float
+    warning_required: bool
+    hard_cap_blocked: bool
+    block_reason: str | None = None
 
 
 class SourceReview(BaseModel):

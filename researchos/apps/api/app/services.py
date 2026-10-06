@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from .database import connect, decode
 from .providers import get_provider
 from .librarian import CrossrefLibrarian
+from .costs import RATE_CARD_VERSION, estimate_response_cost, mode as search_mode
 from .workflow import Stage, validate_transition
 
 
@@ -35,6 +36,7 @@ def create_project(data: dict) -> dict:
              data.get("initial_thesis"), str(data.get("target_submission_date")) if data.get("target_submission_date") else None,
              Stage.IDEA, timestamp, timestamp),
         )
+        db.execute("INSERT INTO project_budgets VALUES (?, 100, 15, 1, 1, ?)", (project_id, timestamp))
     return get_project(project_id)
 
 
@@ -100,13 +102,67 @@ def get_plan(project_id: str) -> dict | None:
         return decode(db.execute("SELECT id, project_id, version, content, created_at FROM research_plans WHERE project_id = ? ORDER BY version DESC LIMIT 1", (project_id,)).fetchone())
 
 
-def run_search(project_id: str, provider_name: str) -> dict:
+def budget_summary(project_id: str) -> dict:
+    with connect() as db:
+        row = db.execute("SELECT * FROM project_budgets WHERE project_id = ?", (project_id,)).fetchone()
+        if not row:
+            if not db.execute("SELECT 1 FROM projects WHERE id = ?", (project_id,)).fetchone():
+                raise KeyError(project_id)
+            db.execute("INSERT INTO project_budgets VALUES (?, 100, 15, 1, 1, ?)", (project_id, now()))
+            row = db.execute("SELECT * FROM project_budgets WHERE project_id = ?", (project_id,)).fetchone()
+        project_spend = db.execute("SELECT COALESCE(SUM(estimated_cost_usd), 0) FROM cost_events WHERE project_id = ?", (project_id,)).fetchone()[0]
+        research_spend = db.execute("SELECT COALESCE(SUM(estimated_cost_usd), 0) FROM cost_events WHERE project_id = ? AND stage = 'RESEARCHING'", (project_id,)).fetchone()[0]
+    value = dict(row)
+    value["hard_cap_enabled"] = bool(value["hard_cap_enabled"])
+    value.update({"project_spend_usd": round(project_spend, 4), "research_spend_usd": round(research_spend, 4), "remaining_project_usd": round(max(0, value["project_limit_usd"] - project_spend), 4), "remaining_research_usd": round(max(0, value["research_limit_usd"] - research_spend), 4)})
+    value.pop("project_id", None); value.pop("updated_at", None)
+    return value
+
+
+def update_budget(project_id: str, settings: dict) -> dict:
+    budget_summary(project_id)
+    with connect() as db:
+        db.execute("UPDATE project_budgets SET project_limit_usd = ?, research_limit_usd = ?, single_run_warning_usd = ?, hard_cap_enabled = ?, updated_at = ? WHERE project_id = ?", (settings["project_limit_usd"], settings["research_limit_usd"], settings["single_run_warning_usd"], int(settings["hard_cap_enabled"]), now(), project_id))
+    return budget_summary(project_id)
+
+
+def _completed_queries(project_id: str, provider: str, mode_name: str) -> set[str]:
+    keys = [f"{provider}:{mode_name}"]
+    if mode_name in {"quick", "standard"}:
+        keys.extend([provider, f"{provider}:standard", f"{provider}:deep"])
+    placeholders = ",".join("?" for _ in keys)
+    with connect() as db:
+        return {row[0] for row in db.execute(f"SELECT DISTINCT query FROM search_queries WHERE project_id = ? AND provider IN ({placeholders})", (project_id, *keys))}
+
+
+def search_preflight(project_id: str, provider_name: str, mode_name: str, force: bool = False) -> dict:
+    project = get_project(project_id)
+    if not project: raise KeyError(project_id)
+    profile = search_mode(mode_name)
+    queries = research_queries(project)[:profile.query_limit]
+    completed = set() if force else _completed_queries(project_id, provider_name, mode_name)
+    new_queries = [query for query in queries if query not in completed]
+    estimate = round(profile.baseline_estimate_usd * len(new_queries) / max(1, profile.query_limit), 2)
+    budget = budget_summary(project_id)
+    reason = None
+    if budget["hard_cap_enabled"] and estimate > budget["remaining_project_usd"]: reason = "Project hard cap would be exceeded"
+    if budget["hard_cap_enabled"] and estimate > budget["remaining_research_usd"]: reason = "Research-stage hard cap would be exceeded"
+    return {"mode": mode_name, "query_count": len(queries), "new_query_count": len(new_queries), "duplicate_query_count": len(queries) - len(new_queries), "estimated_cost_usd": estimate, "warning_required": estimate >= budget["single_run_warning_usd"], "hard_cap_blocked": reason is not None, "block_reason": reason}
+
+
+def run_search(project_id: str, provider_name: str, mode_name: str = "standard", force: bool = False, approved_warning: bool = False) -> dict:
     project = get_project(project_id)
     if not project:
         raise KeyError(project_id)
+    preflight = search_preflight(project_id, provider_name, mode_name, force)
+    if preflight["hard_cap_blocked"]: raise PermissionError(preflight["block_reason"])
+    if preflight["warning_required"] and not approved_warning: raise PermissionError("This run requires explicit cost-warning approval")
+    profile = search_mode(mode_name)
     provider, run_id, started = get_provider(provider_name), uid(), now()
-    queries, added, verified = research_queries(project), 0, 0
-    totals = {"input": 0, "output": 0, "cached": 0}
+    completed = set() if force else _completed_queries(project_id, provider_name, mode_name)
+    queries = [query for query in research_queries(project)[:profile.query_limit] if query not in completed]
+    added, verified = 0, 0
+    totals = {"input": 0, "output": 0, "cached": 0, "tool_calls": 0, "cost": 0.0}
     with connect() as db:
         db.execute("INSERT INTO agent_runs VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 0, 0, 0, 0, 0, NULL)",
                    (run_id, project_id, "Literature Scout", "Discover candidate literature", provider.model, "running", started))
@@ -114,10 +170,13 @@ def run_search(project_id: str, provider_name: str) -> dict:
     try:
         for query in queries:
             source_ids = []
-            batch = provider.search(query)
+            batch = provider.search(query, profile.context_size, profile.candidate_limit)
             totals["input"] += batch.input_tokens
             totals["output"] += batch.output_tokens
             totals["cached"] += batch.cached_tokens
+            totals["tool_calls"] += batch.tool_calls
+            query_cost = estimate_response_cost(provider.model, batch.input_tokens, batch.output_tokens, batch.cached_tokens, batch.tool_calls)
+            totals["cost"] += query_cost
             with connect() as db:
                 for candidate in batch.sources:
                     candidate, verification_status, raw_metadata = librarian.verify(candidate)
@@ -131,16 +190,17 @@ def run_search(project_id: str, provider_name: str) -> dict:
                         added += 1
                         db.execute("INSERT INTO source_verifications VALUES (?, ?, ?, ?, ?, ?)", (uid(), source_id, librarian.provider, verification_status, now(), json.dumps(raw_metadata) if raw_metadata else None))
                         verified += int(verification_status == "verified")
-                db.execute("INSERT INTO search_queries VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (uid(), project_id, query, provider.name, now(), len(batch.sources), json.dumps(source_ids), run_id))
+                db.execute("INSERT INTO search_queries VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (uid(), project_id, query, f"{provider.name}:{mode_name}", now(), len(batch.sources), json.dumps(source_ids), run_id))
+                db.execute("INSERT INTO cost_events VALUES (?, ?, ?, 'RESEARCHING', ?, ?, ?, ?, ?, ?, ?, ?, ?)", (uid(), project_id, run_id, provider.name, provider.model, batch.input_tokens, batch.output_tokens, batch.cached_tokens, batch.tool_calls, query_cost, RATE_CARD_VERSION, now()))
         with connect() as db:
-            db.execute("UPDATE agent_runs SET status = 'completed', completed_at = ?, input_tokens = ?, output_tokens = ?, cached_tokens = ? WHERE id = ?", (now(), totals["input"], totals["output"], totals["cached"], run_id))
+            db.execute("UPDATE agent_runs SET status = 'completed', completed_at = ?, input_tokens = ?, output_tokens = ?, cached_tokens = ?, tool_cost = ?, estimated_cost = ? WHERE id = ?", (now(), totals["input"], totals["output"], totals["cached"], totals["tool_calls"] * 0.01, totals["cost"], run_id))
             if project["stage"] == Stage.BRIEF_APPROVED:
                 db.execute("UPDATE projects SET stage = ?, updated_at = ? WHERE id = ?", (Stage.RESEARCHING, now(), project_id))
     except Exception as error:
         with connect() as db:
             db.execute("UPDATE agent_runs SET status = 'failed', completed_at = ?, input_tokens = ?, output_tokens = ?, cached_tokens = ?, error = ? WHERE id = ?", (now(), totals["input"], totals["output"], totals["cached"], str(error)[:1000], run_id))
         raise
-    return {"run_id": run_id, "query_count": len(queries), "sources_added": added, "sources_verified": verified}
+    return {"run_id": run_id, "query_count": len(queries), "sources_added": added, "sources_verified": verified, "queries_skipped": preflight["duplicate_query_count"], "estimated_cost_usd": round(totals["cost"], 4)}
 
 
 def list_sources(project_id: str) -> list[dict]:

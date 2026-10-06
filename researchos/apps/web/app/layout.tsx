@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./styles.css";
+import "./costs.css";
 
 export const metadata: Metadata = { title: "ResearchOS", description: "High-integrity autonomous research" };
 

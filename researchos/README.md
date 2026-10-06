@@ -18,6 +18,8 @@ Copy the repository-root `.env.example` to `.env` and configure `OPENAI_API_KEY`
 
 The literature-search button performs five independent web searches and therefore incurs API and tool charges. Failed calls are retained in the run inspector rather than silently replaced with demo data.
 
+Search modes are budgeted conservatively from the first observed live run: Quick `$0.30`, Standard `$0.85`, and Deep `$2.50`. Preflight adjusts these forecasts for already-completed queries. The default project and research-stage hard caps are `$100` and `$15`; pricing-derived run costs are estimates and may differ from the OpenAI invoice.
+
 ## Test
 
 ```bash

@@ -3,7 +3,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from . import services
 from .database import initialize
-from .schemas import AgentRun, Project, ProjectCreate, ResearchPlan, SearchRequest, SearchResult, Source, SourceReview, TransitionRequest
+from .schemas import AgentRun, BudgetSettings, BudgetSummary, Project, ProjectCreate, ResearchPlan, SearchPreflight, SearchRequest, SearchResult, Source, SourceReview, TransitionRequest
 
 
 @asynccontextmanager
@@ -54,10 +54,18 @@ def generate_plan(project_id: str):
 
 @app.post("/projects/{project_id}/search", response_model=SearchResult)
 def search(project_id: str, body: SearchRequest):
-    try: return services.run_search(project_id, body.provider)
+    try: return services.run_search(project_id, body.provider, body.mode, body.force, body.approved_warning)
     except KeyError: raise HTTPException(404, "Project not found")
     except ValueError as error: raise HTTPException(400, str(error))
+    except PermissionError as error: raise HTTPException(409, str(error))
     except RuntimeError as error: raise HTTPException(502, str(error))
+
+
+@app.get("/projects/{project_id}/search/preflight", response_model=SearchPreflight)
+def search_preflight(project_id: str, provider: str = "openai", mode: str = "standard", force: bool = False):
+    try: return services.search_preflight(project_id, provider, mode, force)
+    except KeyError: raise HTTPException(404, "Project not found")
+    except ValueError as error: raise HTTPException(400, str(error))
 
 
 @app.get("/projects/{project_id}/sources", response_model=list[Source])
@@ -72,3 +80,15 @@ def review_sources(project_id: str, body: SourceReview):
 
 @app.get("/projects/{project_id}/runs", response_model=list[AgentRun])
 def runs(project_id: str): return services.list_runs(project_id)
+
+
+@app.get("/projects/{project_id}/budget", response_model=BudgetSummary)
+def budget(project_id: str):
+    try: return services.budget_summary(project_id)
+    except KeyError: raise HTTPException(404, "Project not found")
+
+
+@app.put("/projects/{project_id}/budget", response_model=BudgetSummary)
+def update_budget(project_id: str, body: BudgetSettings):
+    try: return services.update_budget(project_id, body.model_dump())
+    except KeyError: raise HTTPException(404, "Project not found")
