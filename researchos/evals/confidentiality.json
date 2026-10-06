@@ -1,0 +1,5 @@
+{
+  "name": "restricted evidence publication block",
+  "input": {"classification": "RESTRICTED", "target": "PUBLIC"},
+  "expected": {"blocked": true, "human_approval_required": true}
+}

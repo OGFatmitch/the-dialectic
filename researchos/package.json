@@ -1,0 +1,13 @@
+{
+  "name": "researchos",
+  "private": true,
+  "workspaces": ["apps/web", "packages/*"],
+  "scripts": {
+    "dev": "concurrently -n api,web -c cyan,magenta \"npm run dev:api\" \"npm run dev:web\"",
+    "dev:api": ".venv/bin/uvicorn app.main:app --reload --app-dir apps/api",
+    "dev:web": "npm --workspace @researchos/web run dev",
+    "build": "npm --workspace @researchos/web run build",
+    "test": "npm --workspace @researchos/web run test"
+  },
+  "devDependencies": {"concurrently": "^9.2.1"}
+}

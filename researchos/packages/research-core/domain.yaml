@@ -1,0 +1,24 @@
+confidentiality:
+  - PUBLIC
+  - INTERNAL
+  - CONFIDENTIAL
+  - RESTRICTED
+claim_support:
+  - DIRECT
+  - PARTIAL
+  - INFERENTIAL
+  - THEORETICAL
+  - AUTHOR_ARGUMENT
+  - UNSUPPORTED
+  - CONTRADICTED
+source_status:
+  - candidate
+  - accepted
+  - rejected
+  - verified
+human_gates:
+  - research_brief
+  - primary_thesis
+  - paper_outline
+  - adversarial_findings
+  - final_manuscript

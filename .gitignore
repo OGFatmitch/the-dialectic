@@ -1,0 +1,21 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Node
+node_modules/
+.next/
+
+# ResearchOS runtime data
+researchos/data/
+
+# IDE and OS
+.idea/
+.DS_Store

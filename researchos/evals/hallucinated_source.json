@@ -1,0 +1,5 @@
+{
+  "name": "hallucinated source rejection",
+  "input": {"title": "The Autonomous Enterprise Control Plane", "doi": "10.0000/fake.2026.42"},
+  "expected": {"accepted": false, "reason_contains": "unverified"}
+}

@@ -1,0 +1,5 @@
+{
+  "name": "contradictory findings remain visible",
+  "input": {"claim": "Autonomy always improves productivity", "supporting_sources": ["S-1"], "contradictory_sources": ["S-2"]},
+  "expected": {"support_status": "CONTRADICTED", "contradictory_sources": ["S-2"]}
+}

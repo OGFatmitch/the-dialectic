@@ -1,0 +1,19 @@
+venue: IEEE Software
+article_type: feature
+audience:
+  - software architects
+  - engineering leaders
+  - practitioners
+priorities:
+  - technical novelty
+  - actionable architecture
+  - evidence
+  - clarity
+max_words: 5400
+citation_style: IEEE
+review_dimensions:
+  novelty: 0.25
+  technical_rigor: 0.25
+  applicability: 0.20
+  evidence: 0.20
+  clarity: 0.10
