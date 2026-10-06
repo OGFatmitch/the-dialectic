@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime, timezone
 from .database import connect, decode
 from .providers import get_provider
+from .librarian import CrossrefLibrarian
 from .workflow import Stage, validate_transition
 
 
@@ -104,32 +105,60 @@ def run_search(project_id: str, provider_name: str) -> dict:
     if not project:
         raise KeyError(project_id)
     provider, run_id, started = get_provider(provider_name), uid(), now()
-    queries, added = research_queries(project), 0
+    queries, added, verified = research_queries(project), 0, 0
+    totals = {"input": 0, "output": 0, "cached": 0}
     with connect() as db:
         db.execute("INSERT INTO agent_runs VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 0, 0, 0, 0, 0, NULL)",
-                   (run_id, project_id, "Literature Scout", "Discover candidate literature", provider.name, "running", started))
+                   (run_id, project_id, "Literature Scout", "Discover candidate literature", provider.model, "running", started))
+    librarian = CrossrefLibrarian()
+    try:
         for query in queries:
             source_ids = []
-            results = provider.search(query)
-            for candidate in results:
-                source_id = uid()
-                cursor = db.execute(
-                    "INSERT OR IGNORE INTO sources VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'candidate', ?, ?)",
-                    (source_id, project_id, candidate["title"], json.dumps(candidate["authors"]), candidate["publication_year"],
-                     candidate["venue"], candidate["source_type"], candidate["doi"], candidate["url"], candidate["abstract"],
-                     candidate["relevance_score"], candidate["relevance_reason"], query, now(), run_id),
-                )
-                if cursor.rowcount:
-                    source_ids.append(source_id)
-                    added += 1
-            db.execute("INSERT INTO search_queries VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                       (uid(), project_id, query, provider.name, now(), len(results), json.dumps(source_ids), run_id))
-        db.execute("UPDATE agent_runs SET status = 'completed', completed_at = ? WHERE id = ?", (now(), run_id))
-        if project["stage"] == Stage.BRIEF_APPROVED:
-            db.execute("UPDATE projects SET stage = ?, updated_at = ? WHERE id = ?", (Stage.RESEARCHING, now(), project_id))
-    return {"run_id": run_id, "query_count": len(queries), "sources_added": added}
+            batch = provider.search(query)
+            totals["input"] += batch.input_tokens
+            totals["output"] += batch.output_tokens
+            totals["cached"] += batch.cached_tokens
+            with connect() as db:
+                for candidate in batch.sources:
+                    candidate, verification_status, raw_metadata = librarian.verify(candidate)
+                    source_id = uid()
+                    cursor = db.execute(
+                        "INSERT OR IGNORE INTO sources VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'candidate', ?, ?)",
+                        (source_id, project_id, candidate["title"], json.dumps(candidate["authors"]), candidate["publication_year"], candidate["venue"], candidate["source_type"], candidate.get("doi"), candidate.get("url"), candidate.get("abstract"), candidate["relevance_score"], candidate["relevance_reason"], query, now(), run_id),
+                    )
+                    if cursor.rowcount:
+                        source_ids.append(source_id)
+                        added += 1
+                        db.execute("INSERT INTO source_verifications VALUES (?, ?, ?, ?, ?, ?)", (uid(), source_id, librarian.provider, verification_status, now(), json.dumps(raw_metadata) if raw_metadata else None))
+                        verified += int(verification_status == "verified")
+                db.execute("INSERT INTO search_queries VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (uid(), project_id, query, provider.name, now(), len(batch.sources), json.dumps(source_ids), run_id))
+        with connect() as db:
+            db.execute("UPDATE agent_runs SET status = 'completed', completed_at = ?, input_tokens = ?, output_tokens = ?, cached_tokens = ? WHERE id = ?", (now(), totals["input"], totals["output"], totals["cached"], run_id))
+            if project["stage"] == Stage.BRIEF_APPROVED:
+                db.execute("UPDATE projects SET stage = ?, updated_at = ? WHERE id = ?", (Stage.RESEARCHING, now(), project_id))
+    except Exception as error:
+        with connect() as db:
+            db.execute("UPDATE agent_runs SET status = 'failed', completed_at = ?, input_tokens = ?, output_tokens = ?, cached_tokens = ?, error = ? WHERE id = ?", (now(), totals["input"], totals["output"], totals["cached"], str(error)[:1000], run_id))
+        raise
+    return {"run_id": run_id, "query_count": len(queries), "sources_added": added, "sources_verified": verified}
 
 
 def list_sources(project_id: str) -> list[dict]:
     with connect() as db:
-        return [decode(row) for row in db.execute("SELECT id, title, authors, publication_year, venue, source_type, doi, url, abstract, relevance_score, relevance_reason, discovery_query, status FROM sources WHERE project_id = ? ORDER BY relevance_score DESC, publication_year DESC", (project_id,))]
+        return [decode(row) for row in db.execute("SELECT s.id, s.title, s.authors, s.publication_year, s.venue, s.source_type, s.doi, s.url, s.abstract, s.relevance_score, s.relevance_reason, s.discovery_query, s.status, v.status AS verification_status FROM sources s LEFT JOIN source_verifications v ON v.source_id = s.id AND v.provider = 'crossref' WHERE s.project_id = ? ORDER BY s.relevance_score DESC, s.publication_year DESC", (project_id,))]
+
+
+def review_sources(project_id: str, source_ids: list[str], decision: str, rationale: str | None) -> int:
+    placeholders = ",".join("?" for _ in source_ids)
+    with connect() as db:
+        found = db.execute(f"SELECT id FROM sources WHERE project_id = ? AND id IN ({placeholders})", (project_id, *source_ids)).fetchall()
+        if len(found) != len(set(source_ids)):
+            raise KeyError("One or more sources do not belong to this project")
+        db.execute(f"UPDATE sources SET status = ? WHERE project_id = ? AND id IN ({placeholders})", (decision, project_id, *source_ids))
+        db.execute("INSERT INTO human_decisions VALUES (?, ?, ?, NULL, NULL, ?, ?)", (uid(), project_id, f"SOURCE_{decision.upper()}", rationale or json.dumps(source_ids), now()))
+    return len(found)
+
+
+def list_runs(project_id: str) -> list[dict]:
+    with connect() as db:
+        return [decode(row) for row in db.execute("SELECT id, agent_name, task, model, status, started_at, completed_at, input_tokens, output_tokens, cached_tokens, estimated_cost, error FROM agent_runs WHERE project_id = ? ORDER BY started_at DESC", (project_id,))]

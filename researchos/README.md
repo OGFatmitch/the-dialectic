@@ -14,6 +14,10 @@ npm run dev
 
 The API runs on `http://localhost:8000`; the web app runs on `http://localhost:3000`. Set `NEXT_PUBLIC_API_URL` to override the API URL.
 
+Copy the repository-root `.env.example` to `.env` and configure `OPENAI_API_KEY` and `OPENAI_PROJECT_ID`. Keys are loaded only by the FastAPI process. `RESEARCHOS_SEARCH_MODEL` defaults to `gpt-5.5`; `CROSSREF_MAILTO` identifies the client to Crossref's polite pool.
+
+The literature-search button performs five independent web searches and therefore incurs API and tool charges. Failed calls are retained in the run inspector rather than silently replaced with demo data.
+
 ## Test
 
 ```bash

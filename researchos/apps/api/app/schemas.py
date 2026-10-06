@@ -1,5 +1,5 @@
 from datetime import date
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field
 from .workflow import Stage
 
 
@@ -43,6 +43,7 @@ class Source(BaseModel):
     relevance_reason: str
     discovery_query: str
     status: str
+    verification_status: str | None = None
 
 
 class ResearchPlan(BaseModel):
@@ -54,10 +55,32 @@ class ResearchPlan(BaseModel):
 
 
 class SearchRequest(BaseModel):
-    provider: str = "demo"
+    provider: str = "openai"
 
 
 class SearchResult(BaseModel):
     run_id: str
     query_count: int
     sources_added: int
+    sources_verified: int = 0
+
+
+class SourceReview(BaseModel):
+    source_ids: list[str] = Field(min_length=1)
+    decision: str = Field(pattern="^(accepted|rejected)$")
+    rationale: str | None = None
+
+
+class AgentRun(BaseModel):
+    id: str
+    agent_name: str
+    task: str
+    model: str
+    status: str
+    started_at: str
+    completed_at: str | None
+    input_tokens: int
+    output_tokens: int
+    cached_tokens: int
+    estimated_cost: float
+    error: str | None

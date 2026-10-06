@@ -2,7 +2,8 @@ from fastapi.testclient import TestClient
 from app.main import app
 
 
-def test_vertical_slice():
+def test_vertical_slice(monkeypatch):
+    monkeypatch.setattr("app.services.CrossrefLibrarian.verify", lambda self, candidate: (candidate, "verified", {"DOI": candidate.get("doi")}))
     with TestClient(app) as client:
         created = client.post("/projects", json={
             "title": "Governing Autonomous AI at Scale",
@@ -18,3 +19,6 @@ def test_vertical_slice():
         assert result.json()["query_count"] == 5
         sources = client.get(f"/projects/{project['id']}/sources").json()
         assert sources and sources[0]["status"] == "candidate"
+        assert sources[0]["verification_status"] == "verified"
+        reviewed = client.post(f"/projects/{project['id']}/sources/review", json={"source_ids": [sources[0]["id"]], "decision": "accepted"})
+        assert reviewed.json()["updated"] == 1

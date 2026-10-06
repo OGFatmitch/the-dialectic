@@ -21,6 +21,13 @@ CREATE TABLE IF NOT EXISTS sources (
   created_at TEXT NOT NULL, run_id TEXT NOT NULL,
   UNIQUE(project_id, title, publication_year)
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sources_project_doi
+  ON sources(project_id, doi) WHERE doi IS NOT NULL;
+CREATE TABLE IF NOT EXISTS source_verifications (
+  id TEXT PRIMARY KEY, source_id TEXT NOT NULL REFERENCES sources(id),
+  provider TEXT NOT NULL, status TEXT NOT NULL, checked_at TEXT NOT NULL,
+  raw_metadata TEXT, UNIQUE(source_id, provider)
+);
 CREATE TABLE IF NOT EXISTS search_queries (
   id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
   query TEXT NOT NULL, provider TEXT NOT NULL, timestamp TEXT NOT NULL,

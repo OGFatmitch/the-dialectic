@@ -1,16 +1,36 @@
+import json
+import os
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
+
+import httpx
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parents[4] / ".env")
+load_dotenv()
+
+
+@dataclass
+class SearchBatch:
+    sources: list[dict]
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cached_tokens: int = 0
 
 
 class SearchProvider(Protocol):
     name: str
-    def search(self, query: str) -> list[dict]: ...
+    model: str
+    def search(self, query: str) -> SearchBatch: ...
 
 
 class DemoSearchProvider:
     """Deterministic, explicitly non-verified candidates for local development."""
     name = "demo"
+    model = "deterministic-v1"
 
-    def search(self, query: str) -> list[dict]:
+    def search(self, query: str) -> SearchBatch:
         corpus = [
             {
                 "title": "AI Risk Management Framework (AI RMF 1.0)",
@@ -39,10 +59,71 @@ class DemoSearchProvider:
             overlap = sum(word in haystack for word in words)
             item["relevance_score"] = min(1.0, 0.45 + overlap * 0.1)
             item["relevance_reason"] = f"Candidate intersects {max(overlap, 1)} search concepts; metadata requires librarian verification."
-        return corpus[:1]
+        return SearchBatch(corpus[:1])
+
+
+SOURCE_SCHEMA = {
+    "type": "object",
+    "properties": {"sources": {"type": "array", "maxItems": 5, "items": {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"}, "authors": {"type": "array", "items": {"type": "string"}},
+            "publication_year": {"type": ["integer", "null"]}, "venue": {"type": ["string", "null"]},
+            "source_type": {"type": "string"}, "doi": {"type": ["string", "null"]},
+            "url": {"type": ["string", "null"]}, "abstract": {"type": ["string", "null"]},
+            "relevance_score": {"type": "number", "minimum": 0, "maximum": 1},
+            "relevance_reason": {"type": "string"},
+        },
+        "required": ["title", "authors", "publication_year", "venue", "source_type", "doi", "url", "abstract", "relevance_score", "relevance_reason"],
+        "additionalProperties": False,
+    }}},
+    "required": ["sources"], "additionalProperties": False,
+}
+
+
+class OpenAIWebSearchProvider:
+    name = "openai"
+
+    def __init__(self):
+        self.api_key = os.getenv("OPENAI_API_KEY")
+        self.project_id = os.getenv("OPENAI_PROJECT_ID")
+        self.model = os.getenv("RESEARCHOS_SEARCH_MODEL", "gpt-5.5")
+        if not self.api_key:
+            raise ValueError("OPENAI_API_KEY is not configured on the API server")
+
+    def search(self, query: str) -> SearchBatch:
+        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        if self.project_id:
+            headers["OpenAI-Project"] = self.project_id
+        prompt = (
+            "You are the Literature Scout in a high-integrity scholarly system. Search for up to five real, "
+            "high-quality sources relevant to the query below. Prefer peer-reviewed original research, official "
+            "standards, government publications, and primary technical documentation. Include contradictory work "
+            "when relevant. Never infer metadata from a title and never invent a DOI. Use null when uncertain. "
+            "Return candidate metadata only; a separate librarian will verify it.\n\nQUERY: " + query
+        )
+        payload = {
+            "model": self.model,
+            "tools": [{"type": "web_search", "search_context_size": "medium"}],
+            "include": ["web_search_call.action.sources"], "input": prompt,
+            "text": {"format": {"type": "json_schema", "name": "literature_candidates", "strict": True, "schema": SOURCE_SCHEMA}},
+            "store": False,
+        }
+        with httpx.Client(timeout=120) as client:
+            response = client.post("https://api.openai.com/v1/responses", headers=headers, json=payload)
+        if response.is_error:
+            try: detail = response.json().get("error", {}).get("message", response.text)
+            except ValueError: detail = response.text
+            raise RuntimeError(f"OpenAI search failed ({response.status_code}): {detail}")
+        body = response.json()
+        text = next(content["text"] for item in body.get("output", []) if item.get("type") == "message" for content in item.get("content", []) if content.get("type") == "output_text")
+        usage = body.get("usage") or {}
+        return SearchBatch(json.loads(text)["sources"], usage.get("input_tokens", 0), usage.get("output_tokens", 0), (usage.get("input_tokens_details") or {}).get("cached_tokens", 0))
 
 
 def get_provider(name: str) -> SearchProvider:
     if name == "demo":
         return DemoSearchProvider()
+    if name == "openai":
+        return OpenAIWebSearchProvider()
     raise ValueError(f"Unknown or unconfigured search provider: {name}")
